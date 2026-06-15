@@ -175,6 +175,85 @@ EXCLUDED_PROJECTS=
 
 ---
 
+---
+
+## TickTick V1 API Reference (httpx calls)
+
+Base URL: `https://api.ticktick.com/open/v1`
+Auth header: `Authorization: Bearer {access_token}`
+
+### OAuth Flow
+
+1. Redirect user: `https://ticktick.com/oauth/authorize?client_id=X&scope=tasks:read+tasks:write&redirect_uri=Y&response_type=code`
+2. User grants access → redirected to `Y?code=AUTH_CODE`
+3. Exchange code: `POST https://ticktick.com/oauth/token`
+   - Body: `grant_type=authorization_code&code=AUTH_CODE&redirect_uri=Y`
+   - Auth: `Basic base64(client_id:client_secret)`
+   - Response: `{ "access_token": "...", "token_type": "bearer" }`
+
+No documented refresh token mechanism in V1 — token appears long-lived. Re-auth if expired.
+
+### Endpoints Used
+
+| Endpoint | Method | Used by | Request Body | Response |
+|----------|--------|---------|-------------|----------|
+| `/project` | GET | `list_projects` | — | `[{id, name, color, sort_order, view_mode, kind}, ...]` |
+| `/project/{id}/data` | GET | `read_quick_notes` | — | `{project: {...}, tasks: [{id, project_id, title, content, due_date, priority, tags, status, ...}], columns: []}` |
+| `/task` | POST | `create_task` | `{title, projectId, content, dueDate, priority, tags, timeZone}` | created task object |
+| `/task/{id}` | POST | `move_to_processed` | `{projectId: NEW_ID}` (partial update) | updated task object |
+| `/project/{pid}/task/{tid}` | GET | validate in `move_to_processed` | — | task object |
+
+### Task Object Shape (V1 response)
+
+```json
+{
+  "id": "67ec273212e1101e875f078b",
+  "projectId": "67ec23b18f08cf38dd957e10",
+  "title": "Task title",
+  "content": "Description/notes",
+  "desc": "",
+  "dueDate": "2026-06-12T12:00:00+0000",
+  "priority": 0,
+  "tags": ["tag1", "tag2"],
+  "status": 0,
+  "isAllDay": false,
+  "startDate": null,
+  "timeZone": "Europe/London",
+  "sortOrder": -4398046511104,
+  "kind": "TEXT"
+}
+```
+
+### Priority Values
+
+| Value | Meaning |
+|-------|---------|
+| 0 | None |
+| 1 | Low |
+| 3 | Medium |
+| 5 | High |
+
+### V1 API Limitations (relevant to this project)
+
+- **No tags endpoint** — V1 has no way to list/manage tags
+- No access to completed tasks
+- No batch operations
+- `POST /task/{id}` for update accepts partial body (only fields to change)
+
+### Tags: V2 Undocumented API
+
+Since V1 has no tag listing, use V2 `GET /batch/check/0` (undocumented).
+
+- Base URL: `https://api.ticktick.com/api/v2`
+- Auth: Login via `POST /user/signon` with `{username, password}` → get cookie/token
+- Response from `/batch/check/0` includes `"tags": [{label, color, parent, ...}, ...]`
+
+**Alternative (simpler):** Maintain `tags.json` locally, seeded manually. Updated when `create_task` uses new tags. Avoids V2 auth complexity entirely.
+
+**Decision:** Use `tags.json` approach. V2 auth requires storing plaintext password and reverse-engineering login flow. Not worth complexity for tag listing. Seed file manually, auto-append on task creation.
+
+---
+
 ### Task 8: Security hardening
 
 **Objective:** Enforce security boundaries regardless of what the AI requests.
