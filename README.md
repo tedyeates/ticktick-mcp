@@ -20,6 +20,7 @@ Secure MCP server giving AI agents controlled access to TickTick.
 | `create_task` | Create task in approved project |
 | `move_to_processed` | Move Quick Note to Processed project |
 | `read_shopping_list` | Read tasks from shopping projects (includes completed items) |
+| `get_completed_today` | Get all tasks completed today (excludes shopping; for diary) |
 | `create_shopping_list` | Batch-create shopping list tasks |
 | `add_shopping_item` | Add single item to a shopping project |
 | `remove_shopping_item` | Remove item from shopping project by title match |

@@ -118,6 +118,7 @@ def create_task(
     due_date: str | None = None,
     priority: int = 0,
     tags: list[str] | None = None,
+    content: str | None = None,
 ) -> dict:
     """Create a task in an approved project.
 
@@ -127,6 +128,7 @@ def create_task(
         due_date: Optional ISO date string
         priority: 0=none, 1=low, 3=medium, 5=high
         tags: Optional list of tag strings
+        content: Optional markdown content body for the task
     """
     _check_rate()
     params = {"title": title, "project_name": project_name, "due_date": due_date, "priority": priority, "tags": tags}
@@ -160,6 +162,8 @@ def create_task(
         all_tags = _load_tags()
         all_tags.extend(tags)
         _save_tags(all_tags)
+    if content:
+        payload["content"] = content
 
     return _create(payload)
 
@@ -188,29 +192,9 @@ def move_to_processed(task_id: str) -> dict:
     if DRY_RUN:
         return {"id": task_id, "projectId": PROCESSED_PROJECT_ID}
 
-    from ticktick import get_task, delete_task, create_task as _create
+    from ticktick import move_task
 
-    # Validate task belongs to Quick Notes
-    task = get_task(QUICK_NOTES_PROJECT_ID, task_id)
-    if task.get("projectId") != QUICK_NOTES_PROJECT_ID:
-        raise ValueError("Task does not belong to Quick Notes project")
-
-    # Recreate in Processed then delete from Quick Notes
-    payload = {
-        "title": task["title"],
-        "projectId": PROCESSED_PROJECT_ID,
-        "priority": task.get("priority", 0),
-    }
-    if task.get("content"):
-        payload["content"] = task["content"]
-    if task.get("tags"):
-        payload["tags"] = task["tags"]
-    if task.get("dueDate"):
-        payload["dueDate"] = task["dueDate"]
-
-    new_task = _create(payload)
-    delete_task(QUICK_NOTES_PROJECT_ID, task_id)
-    return new_task
+    return move_task(QUICK_NOTES_PROJECT_ID, PROCESSED_PROJECT_ID, task_id)
 
 
 @mcp.tool()
@@ -232,22 +216,36 @@ def clear_shopping_list(shop: str | None = None) -> str:
     targets = [shop] if shop else SHOPPING_PROJECTS
 
     if DRY_RUN:
-        return f"dry-run: would clear {targets}"
+        return f"dry-run: would clear completed tasks from {targets}"
 
-    from ticktick import list_projects as _list, get_project_data, delete_task
+    from datetime import datetime, timedelta
+    from ticktick import list_projects as _list, get_completed_tasks, delete_task
 
     projects = _list()
-    deleted = 0
+    now = datetime.utcnow()
+    from_date = (now - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S+0000")
+    to_date = now.strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+    matched = []
     for target in targets:
         match = next((p for p in projects if p["name"].lower() == target.lower()), None)
-        if not match:
-            continue
-        data = get_project_data(match["id"])
-        for task in data.get("tasks", []):
-            delete_task(match["id"], task["id"])
+        if match:
+            matched.append(match)
+
+    if not matched:
+        return "No matching projects found"
+
+    project_ids = [m["id"] for m in matched]
+    completed = get_completed_tasks(project_ids, from_date, to_date)
+
+    deleted = 0
+    for task in completed:
+        pid = task.get("projectId")
+        if pid:
+            delete_task(pid, task["id"])
             deleted += 1
 
-    return f"Cleared {deleted} tasks from {targets}"
+    return f"Cleared {deleted} completed tasks from {targets}"
 
 
 @mcp.tool()
@@ -385,6 +383,44 @@ def read_shopping_list(shop: str | None = None) -> list[dict]:
 
 
 @mcp.tool()
+def get_completed_today() -> list[dict]:
+    """Return all tasks completed today (for diary/review). Excludes shopping projects."""
+    _check_rate()
+    _audit("get_completed_today", {})
+
+    if DRY_RUN:
+        return [{"id": "dry-run", "title": "dry-run task", "project": "dry-run"}]
+
+    from datetime import timezone
+    from ticktick import list_projects as _list, get_completed_tasks
+
+    now = datetime.now(timezone.utc)
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    from_date = start_of_day.strftime("%Y-%m-%dT%H:%M:%S+0000")
+    to_date = now.strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+    completed = get_completed_tasks([], from_date, to_date)
+
+    # Exclude shopping projects
+    shopping_lower = [s.lower() for s in SHOPPING_PROJECTS]
+    projects = _list()
+    id_to_name = {p["id"]: p["name"] for p in projects}
+
+    results = []
+    for t in completed:
+        proj_name = id_to_name.get(t.get("projectId"), "Unknown")
+        if proj_name.lower() in shopping_lower:
+            continue
+        results.append({
+            "id": t["id"],
+            "title": t["title"],
+            "project": proj_name,
+            "completed_time": t.get("completedTime", ""),
+        })
+    return results
+
+
+@mcp.tool()
 def remove_shopping_item(title: str, project_name: str | None = None) -> str:
     """Remove a single item from a shopping project by title match.
 
@@ -422,6 +458,104 @@ def remove_shopping_item(title: str, project_name: str | None = None) -> str:
                 return f"Removed '{task['title']}' from {target}"
 
     return f"No item matching '{title}' found in {targets}"
+
+
+@mcp.tool()
+def get_project_data_raw(project_name: str) -> dict:
+    """Return full unfiltered project data including columns and all task fields.
+
+    Args:
+        project_name: Project name to look up
+    """
+    _check_rate()
+    _audit("get_project_data_raw", {"project_name": project_name})
+
+    if DRY_RUN:
+        return {"project": {"id": "dry-run", "name": project_name}, "tasks": [], "columns": []}
+
+    from ticktick import list_projects as _list, get_project_data
+
+    projects = _list()
+    match = next((p for p in projects if p["name"].lower() == project_name.lower()), None)
+    if not match:
+        raise ValueError(f"Project '{project_name}' not found")
+
+    return get_project_data(match["id"])
+
+
+@mcp.tool()
+def create_meal_plan(items: list[dict]) -> str:
+    """Create meal plan tasks in the kanban board with column assignment.
+
+    Args:
+        items: List of {title: str, column_name: str, content: str | None, sort_order: int}
+    """
+    _check_rate()
+    _audit("create_meal_plan", {"count": len(items)})
+
+    if DRY_RUN:
+        return f"dry-run: would create {len(items)} meal plan tasks"
+
+    import json
+    from pathlib import Path
+    from ticktick import create_task as _create
+
+    config_path = Path(__file__).parent / "meal_plan_columns.json"
+    if not config_path.exists():
+        raise ValueError("meal_plan_columns.json not found")
+
+    config = json.loads(config_path.read_text())
+    project_id = config["project_id"]
+    columns = config["columns"]
+
+    # Clear existing tasks first
+    clear_meal_plan()
+
+    for item in items:
+        col_id = columns.get(item["column_name"])
+        if not col_id:
+            raise ValueError(f"Unknown column: {item['column_name']}")
+
+        payload = {
+            "title": item["title"],
+            "projectId": project_id,
+            "columnId": col_id,
+            "sortOrder": item.get("sort_order", 0),
+        }
+        if item.get("content"):
+            payload["content"] = item["content"]
+
+        _create(payload)
+
+    return f"Created {len(items)} meal plan tasks"
+
+
+@mcp.tool()
+def clear_meal_plan() -> str:
+    """Delete all tasks from the Meal Plan project."""
+    _check_rate()
+    _audit("clear_meal_plan", {})
+
+    if DRY_RUN:
+        return "dry-run: would clear all meal plan tasks"
+
+    import json
+    from pathlib import Path
+    from ticktick import get_project_data, delete_task
+
+    config_path = Path(__file__).parent / "meal_plan_columns.json"
+    if not config_path.exists():
+        raise ValueError("meal_plan_columns.json not found — run get_project_data_raw to generate it")
+
+    config = json.loads(config_path.read_text())
+    project_id = config["project_id"]
+
+    data = get_project_data(project_id)
+    tasks = data.get("tasks", [])
+    for t in tasks:
+        delete_task(project_id, t["id"])
+
+    return f"Cleared {len(tasks)} tasks from Meal Plan"
 
 
 if __name__ == "__main__":

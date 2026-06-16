@@ -43,13 +43,22 @@ def update_task(task_id: str, payload: dict) -> dict:
 
 
 
+def move_task(from_project_id: str, to_project_id: str, task_id: str) -> dict:
+    payload = [{"fromProjectId": from_project_id, "toProjectId": to_project_id, "taskId": task_id}]
+    resp = httpx.post(f"{BASE_URL}/task/move", json=payload, headers=_headers())
+    resp.raise_for_status()
+    return resp.json()[0]
+
+
 def delete_task(project_id: str, task_id: str):
     resp = httpx.delete(f"{BASE_URL}/project/{project_id}/task/{task_id}", headers=_headers())
     resp.raise_for_status()
 
 
 def get_completed_tasks(project_ids: list[str], start_date: str, end_date: str) -> list:
-    body = {"projectIds": project_ids, "startDate": start_date, "endDate": end_date}
+    body = {"startDate": start_date, "endDate": end_date}
+    if project_ids:
+        body["projectIds"] = project_ids
     resp = httpx.post(f"{BASE_URL}/task/completed", json=body, headers=_headers())
     resp.raise_for_status()
     return resp.json()
